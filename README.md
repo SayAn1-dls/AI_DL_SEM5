@@ -2,7 +2,7 @@
 
 Applied Machine Learning project (CSAI), Newton School of Technology, Rishihood University. Compiled October 25, 2026. Numbers are cited by the repository file they come from; the full write-up is the IEEE-format report, `AML-DL-Report.pdf`. Diagrams use Mermaid, which renders on GitHub.
 
----
+----
 
 ## 1. The short answer
 
