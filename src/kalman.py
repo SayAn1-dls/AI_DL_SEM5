@@ -12,7 +12,11 @@ The weekly version adds 6 seasonal states so the filter can learn day-of-week ef
 """
 import numpy as np
 
-Z_P10_P90 = 1.2816   # normal distribution: 10% / 90% points
+Z_P10_P90 = 1.2816   # normal distribution: 10% / 90% points are mean -/+ 1.2816 sd
+
+NOISE_WINDOW_DAYS = 365        # R is measured on the last year of training data
+MIN_MEASUREMENT_VAR = 0.1      # floor for R, so a near-constant series cannot give R = 0
+INITIAL_STATE_VARIANCE = 100.0 # P0: "we know almost nothing at the start" (a diffuse prior)
 
 
 class KalmanFilter:
@@ -30,8 +34,12 @@ class KalmanFilter:
         K = P_pred @ self.H.T / S                          # Kalman gain
         self.x = x_pred + (K * (y - self.H @ x_pred)).ravel()
         self.P = (np.eye(len(self.x)) - K @ self.H) @ P_pred
+        # How uncertain today's prediction was BEFORE seeing y (in units sold^2).
+        # Stored for the hybrid, which feeds it to the LSTM.
+        self.last_S = float(S.item())
 
     def filter(self, series):
+        """Run update() over a whole series, oldest day first."""
         for y in series:
             self.update(y)
 
@@ -51,31 +59,58 @@ def build_model(train, weekly=False, q_level=0.05, q_trend=0.0005, q_season=0.00
     """Create the filter for one SKU. Noise levels come from a simple heuristic
     (no optimiser): R = variance of sales around the weekday average over the
     last year; Q = fixed small fractions of R."""
-    recent = train[-365:]
+    # R (measurement noise) = how much daily sales scatter around the usual
+    # level for that weekday. Removing the weekday average first means the
+    # weekly pattern is not mistaken for noise.
+    recent = train[-NOISE_WINDOW_DAYS:]
     weekday_mean = np.array([recent[i::7].mean() for i in range(7)])
     residual = recent - np.tile(weekday_mean, len(recent) // 7 + 1)[:len(recent)]
-    R = max(residual.var(), 0.1)
+    R = max(residual.var(), MIN_MEASUREMENT_VAR)
 
+    # Q (process noise) is a small fraction of R: the level may drift a little
+    # each day, the trend much less. Small Q/R = smooth, slow filter;
+    # large Q/R = jumpy filter that follows every sale.
     if not weekly:
-        F = np.array([[1.0, 1.0], [0.0, 1.0]])
-        H = np.array([[1.0, 0.0]])
+        F = np.array([[1.0, 1.0],     # level_t = level_{t-1} + trend_{t-1}
+                      [0.0, 1.0]])    # trend_t = trend_{t-1}
+        H = np.array([[1.0, 0.0]])    # we observe the level (plus noise)
         Q = np.diag([q_level * R, q_trend * R])
-        x0 = np.array([train[:7].mean(), 0.0])
-        P0 = np.eye(2) * 100.0
+        x0 = np.array([train[:7].mean(), 0.0])     # start at the first week's average, flat
+        P0 = np.eye(2) * INITIAL_STATE_VARIANCE
     else:
         n = 8                                   # level, trend, 6 seasonal states
         F = np.zeros((n, n))
-        F[0, 0] = F[0, 1] = F[1, 1] = 1.0
-        F[2, 2:] = -1.0                         # new season = -(sum of last 6)
-        for i in range(3, n):
+        F[0, 0] = F[0, 1] = F[1, 1] = 1.0       # same level/trend rows as above
+        # The 7 weekday effects must add up to 0, so today's effect is minus the
+        # sum of the previous 6. Storing 6 states is enough to know all 7.
+        F[2, 2:] = -1.0
+        for i in range(3, n):                   # shift yesterday's effects down one slot
             F[i, i - 1] = 1.0
         H = np.zeros((1, n))
-        H[0, 0] = H[0, 2] = 1.0
+        H[0, 0] = H[0, 2] = 1.0                 # observation = level + today's weekday effect
         Q = np.diag([q_level * R, q_trend * R, q_season * R] + [0.0] * 5)
         x0 = np.zeros(n)
         x0[0] = train[:7].mean()
-        P0 = np.eye(n) * 100.0
+        P0 = np.eye(n) * INITIAL_STATE_VARIANCE
     return KalmanFilter(F, H, Q, np.array([[R]]), x0, P0)
+
+
+def filtered_states(series: np.ndarray, weekly: bool = False) -> np.ndarray:
+    """Day-by-day output of the filter for one SKU, used by the hybrid.
+
+    Returns a (n_days, 3) array. Row t holds what the filter believes after
+    seeing day t: the level, the trend, and the standard deviation of its
+    one-step-ahead prediction for day t (sqrt of the innovation variance S).
+
+    This is the FILTER, not the smoother: row t uses days 0..t only. A smoother
+    would revise day t using later days, which would leak the future.
+    """
+    kf = build_model(series, weekly=weekly)
+    states = np.empty((len(series), 3))
+    for t, y in enumerate(series):
+        kf.update(y)
+        states[t] = kf.x[0], kf.x[1], np.sqrt(kf.last_S)
+    return states
 
 
 def kalman_forecast(wide, cal, end, horizon=28, weekly=False):
@@ -87,6 +122,8 @@ def kalman_forecast(wide, cal, end, horizon=28, weekly=False):
         kf = build_model(y, weekly=weekly)
         kf.filter(y)
         mean, var = kf.forecast(horizon)
+        # Gaussian interval from the forecast variance. Sales cannot be
+        # negative, so everything is clipped at 0 afterwards.
         sd = np.sqrt(var)
         point.append(np.clip(mean, 0, None))
         p10.append(np.clip(mean - Z_P10_P90 * sd, 0, None))
