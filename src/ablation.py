@@ -70,8 +70,15 @@ def finished_runs(runs_path: Path) -> set:
 
 
 def append_csv(df: pd.DataFrame, path: Path) -> None:
-    """Append rows to a CSV, writing the header only when the file is new."""
-    df.to_csv(path, mode="a", header=not path.exists(), index=False)
+    """Add rows to a CSV, matching columns by NAME.
+
+    A plain append matches columns by position, so a run without interval
+    metrics (mse_loss) would put its seed into the pinball column. Reading the
+    file, concatenating and rewriting keeps every value under its own header.
+    """
+    if path.exists():
+        df = pd.concat([pd.read_csv(path), df], ignore_index=True)
+    df.to_csv(path, index=False)
 
 
 def run_one(name: str, seed: int, wide, cal, origins) -> tuple:
