@@ -13,12 +13,14 @@ N_ORIGINS = 4
 MIN_HISTORY = 56   # SKUs with fewer days of selling history use the cold-start fallback
 
 
-def get_origins(n_days, horizon=HORIZON, n_origins=N_ORIGINS):
-    """Position of each forecast origin. The model may use wide.iloc[:origin]."""
+def get_origins(n_days: int, horizon: int = HORIZON, n_origins: int = N_ORIGINS) -> list:
+    """Position of each forecast origin. The model may use wide.iloc[:origin].
+    The last origin leaves exactly `horizon` days to forecast; earlier origins
+    are spaced `horizon` days apart, so the 4 test windows never overlap."""
     return [n_days - horizon * (n_origins - i) for i in range(n_origins)]
 
 
-def history_length(wide, end):
+def history_length(wide: pd.DataFrame, end: int) -> np.ndarray:
     """Days since the first non-zero sale of every SKU (0 if it never sold)."""
     values = wide.iloc[:end].values
     first_sale = (values > 0).argmax(axis=0)
@@ -28,7 +30,8 @@ def history_length(wide, end):
     return length
 
 
-def cold_start_forecast(wide, end, horizon=HORIZON, min_history=MIN_HISTORY):
+def cold_start_forecast(wide: pd.DataFrame, end: int, horizon: int = HORIZON,
+                        min_history: int = MIN_HISTORY) -> np.ndarray:
     """Fallback for SKUs with too little history: for each weekday take the
     MEDIAN daily demand of the other (established) SKUs of the same store/category
     over the last 28 days."""
@@ -40,8 +43,14 @@ def cold_start_forecast(wide, end, horizon=HORIZON, min_history=MIN_HISTORY):
     return np.array([medians[d.dayofweek] for d in future_days])
 
 
-def run_backtest(wide, cal, models, origins, horizon=HORIZON, min_history=MIN_HISTORY):
-    """models: dict name -> forecast function. Returns the tidy predictions table."""
+def run_backtest(wide: pd.DataFrame, cal: pd.DataFrame, models: dict, origins: list,
+                 horizon: int = HORIZON, min_history: int = MIN_HISTORY) -> pd.DataFrame:
+    """models: dict name -> forecast function. Returns the tidy predictions table.
+
+    Every model gets the same `wide`, `cal`, origins and horizon (PRD fairness
+    rule). The full table is passed, but a model may only read wide.iloc[:end];
+    the leakage test in notebook 02 (future sales set to 999) checks this.
+    """
     tables = []
     for end in origins:
         dates = wide.index[end:end + horizon]
@@ -74,7 +83,7 @@ def run_backtest(wide, cal, models, origins, horizon=HORIZON, min_history=MIN_HI
     return pd.concat(tables, ignore_index=True)
 
 
-def summarize(preds, by=("model",)):
+def summarize(preds: pd.DataFrame, by: tuple = ("model",)) -> pd.DataFrame:
     """Metric table. Point metrics use y_pred (= P50 for probabilistic models).
     Pinball / coverage are only computed where P10 and P90 exist."""
     rows = []
@@ -82,11 +91,17 @@ def summarize(preds, by=("model",)):
         y, yhat = g["actual"].values, g["y_pred"].values
         row = dict(zip(by, key if isinstance(key, tuple) else (key,)))
         row.update(MAE=metrics.mae(y, yhat), RMSE=metrics.rmse(y, yhat), WAPE=metrics.wape(y, yhat))
-        if g["p10"].notna().all():
-            row["pinball_0.1"] = metrics.pinball(y, g["p10"].values, 0.1)
-            row["pinball_0.5"] = metrics.pinball(y, yhat, 0.5)
-            row["pinball_0.9"] = metrics.pinball(y, g["p90"].values, 0.9)
+        # Interval metrics use only the rows that have an interval. Point-only
+        # models (naive, gradient boosting) have none; cold-start SKUs get the
+        # fallback forecast, which has no interval either.
+        has_interval = (g["p10"].notna() & g["p90"].notna()).values
+        if has_interval.any():
+            yi, mid = y[has_interval], yhat[has_interval]
+            low, high = g["p10"].values[has_interval], g["p90"].values[has_interval]
+            row["pinball_0.1"] = metrics.pinball(yi, low, 0.1)
+            row["pinball_0.5"] = metrics.pinball(yi, mid, 0.5)
+            row["pinball_0.9"] = metrics.pinball(yi, high, 0.9)
             row["pinball_avg"] = np.mean([row["pinball_0.1"], row["pinball_0.5"], row["pinball_0.9"]])
-            row["coverage_P10_P90"] = metrics.coverage(y, g["p10"].values, g["p90"].values)
+            row["coverage_P10_P90"] = metrics.coverage(yi, low, high)
         rows.append(row)
     return pd.DataFrame(rows)

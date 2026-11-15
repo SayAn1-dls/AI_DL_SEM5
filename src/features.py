@@ -7,15 +7,15 @@ and only then taking rolling means.
 import numpy as np
 import pandas as pd
 
-LAGS = [1, 7, 14, 28]
-WINDOWS = [7, 28]
+LAGS = [1, 7, 14, 28]   # yesterday, and the same weekday 1, 2 and 4 weeks ago (PRD FR-2)
+WINDOWS = [7, 28]       # rolling means over the last week and the last 4 weeks
 
 CALENDAR_FEATURES = ["dayofweek", "month", "is_weekend", "is_event", "snap"]
 LAG_FEATURES = [f"lag_{k}" for k in LAGS] + [f"roll_mean_{w}" for w in WINDOWS]
 FEATURES = LAG_FEATURES + CALENDAR_FEATURES + ["item_code"]
 
 
-def make_calendar_features(panel):
+def make_calendar_features(panel: pd.DataFrame) -> pd.DataFrame:
     """One row per date with calendar features (these are known in advance)."""
     cal = panel.drop_duplicates("date").set_index("date").sort_index()
     out = pd.DataFrame(index=cal.index)
@@ -27,7 +27,7 @@ def make_calendar_features(panel):
     return out
 
 
-def make_lag_features(wide):
+def make_lag_features(wide: pd.DataFrame) -> pd.DataFrame:
     """wide: dates x SKUs sales table. Returns a long table with lag/rolling
     features and the target `sales`, one row per (date, SKU)."""
     parts = {}
@@ -43,8 +43,10 @@ def make_lag_features(wide):
     return table.reset_index()
 
 
-def make_feature_table(wide, cal_feats):
-    """Lag features + calendar features + item code = full model input table."""
+def make_feature_table(wide: pd.DataFrame, cal_feats: pd.DataFrame) -> pd.DataFrame:
+    """Lag features + calendar features + item code = full model input table.
+    item_code is a whole number per SKU, which gradient boosting treats as a
+    category so one pooled model can still learn SKU-specific levels."""
     table = make_lag_features(wide)
     table = table.merge(cal_feats.reset_index(), on="date", how="left")
     item_codes = {item: i for i, item in enumerate(wide.columns)}

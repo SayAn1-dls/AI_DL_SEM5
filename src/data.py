@@ -42,7 +42,9 @@ def select_skus(sales, store=STORE, category=CATEGORY, n_skus=N_SKUS):
     ok = sub[(sub["first_sale_day"] <= MAX_FIRST_SALE_DAY) & (sub["mean_sales"] >= MIN_MEAN_SALES)]
     ok = ok.sort_values("mean_sales").reset_index(drop=True)
 
-    positions = np.linspace(0, len(ok) - 1, n_skus).round().astype(int)
+    # evenly spaced positions in the sorted list; np.unique drops repeats that
+    # would appear if fewer than n_skus SKUs passed the filters
+    positions = np.unique(np.linspace(0, len(ok) - 1, n_skus).round().astype(int))
     chosen = ok.iloc[positions]
     return chosen.drop(columns=["first_sale_day", "mean_sales"])
 
@@ -119,6 +121,8 @@ def demand_class(series, adi_cut=1.32, cv2_cut=0.49):
     Zeros before the first sale (item not launched yet) are ignored.
     Returns (class_name, adi, cv2)."""
     series = np.asarray(series, dtype=float)
+    if not (series > 0).any():
+        return "no sales", np.inf, np.nan     # never sold: ADI and CV2 are undefined
     series = series[np.argmax(series > 0):]
     nonzero = series[series > 0]
     adi = len(series) / len(nonzero)
